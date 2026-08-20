@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # MinIO: S3-compatible Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: lakehouse_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - lakehouse_net
+
+  # PostgreSQL: Metadata DB cho Airflow & Serving Mart
+  postgres:
+    image: postgres:15-alpine
+    container_name: lakehouse_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow_password
+      POSTGRES_DB: airflow_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - lakehouse_net
+
+  # Apache Airflow
+  airflow:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: lakehouse_airflow
+    depends_on:
+      - postgres
+      - minio
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow_password@postgres:5432/airflow_db
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./requirements.txt:/requirements.txt
+    ports:
+      - "8080:8080"
+    command: bash -c "pip install --no-cache-dir -r /requirements.txt && airflow db init && airflow users create --username admin --password admin --firstname DE --lastname Admin --role Admin --email admin@example.com && airflow webserver & airflow scheduler"
+    networks:
+      - lakehouse_net
+
+  # Metabase: BI Dashboard
+  metabase:
+    image: metabase/metabase:latest
+    container_name: lakehouse_metabase
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    volumes:
+      - metabase_data:/metabase-data
+    networks:
+      - lakehouse_net
+
+volumes:
+  minio_data:
+  postgres_data:
+  metabase_data:
+
+networks:
+  lakehouse_net:
+    driver: bridge
