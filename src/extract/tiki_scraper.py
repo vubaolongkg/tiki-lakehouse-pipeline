@@ -10,7 +10,7 @@ class TikiIngestion:
         self.s3_client = get_s3_client(endpoint_url=s3_endpoint)
         self.crawl_date = date.today().isoformat()
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json",
             "Referer": "https://tiki.vn/"
         }
@@ -51,7 +51,7 @@ class TikiIngestion:
         return categories
 
     # 2. Thu thập danh sách sản phẩm theo danh mục (Listings API)
-    def fetch_products_by_category(self, category_id, category_name, max_pages=1):
+    def fetch_products_by_category(self, category_id, category_name, max_pages=2):
         print(f"\n--- [2/4] Fetching Listings for: {category_name} (ID: {category_id}) ---")
         products = []
         
@@ -77,7 +77,7 @@ class TikiIngestion:
                         "review_count": p.get("review_count", 0),
                         "thumbnail_url": p.get("thumbnail_url"),
                     })
-                time.sleep(0.3)
+                time.sleep(0.15)
             except Exception as e:
                 print(f"Error fetching page {page}: {e}")
                 break
@@ -137,7 +137,7 @@ class TikiIngestion:
                             "comment_count": r.get("comment_count", 0),
                             "created_at": r.get("created_at")
                         })
-                    time.sleep(0.2)
+                    time.sleep(0.08)
                 else:
                     break
             except Exception:
@@ -145,35 +145,46 @@ class TikiIngestion:
         return all_reviews
 
 
-# Hàm chạy ingestion mẫu để kiểm tra
 def run_sample_ingestion():
-    
     ingestion = TikiIngestion()    
-    # 1. Fetch categories
+    # 1. Fetch toàn bộ danh mục từ Homepage
     cats = ingestion.fetch_categories()
     
-    # Lấy thử 2 danh mục để test nhanh luồng Bronze
-    sample_cats = cats[:2] if len(cats) >= 2 else [{"category_id": 316, "category_name": "Sách tiếng Việt"}]
+    # Lấy top 10 danh mục đa dạng
+    sample_cats = cats[:10] if len(cats) >= 10 else cats
+    if not sample_cats:
+        sample_cats = [
+            {"category_id": 316, "category_name": "Sách tiếng Việt"},
+            {"category_id": 1789, "category_name": "Điện Thoại - Máy Tính Bảng"},
+            {"category_id": 1815, "category_name": "Thiết Bị Số"},
+            {"category_id": 1883, "category_name": "Nhà Cửa - Đời Sống"}
+        ]
     
     all_details = []
     all_reviews = []
+    seen_pids = set()
     
     for cat in sample_cats:
-        prods = ingestion.fetch_products_by_category(cat["category_id"], cat["category_name"], max_pages=1)
+        # Lấy 2 trang (tối đa 80 sản phẩm / category)
+        prods = ingestion.fetch_products_by_category(cat["category_id"], cat["category_name"], max_pages=2)
         
-        # Test lấy 5 sản phẩm đầu tiên
-        for p in prods[:5]:
+        # Cào chi tiết 25 sản phẩm mỗi danh mục (tổng ~250 sản phẩm)
+        for p in prods[:25]:
             pid = p["product_id"]
+            if not pid or pid in seen_pids:
+                continue
+            seen_pids.add(pid)
             
             # Fetch Product Detail
             detail = ingestion.fetch_product_detail(pid)
             if detail:
                 all_details.append(detail)
             
-            # Fetch Reviews
-            revs = ingestion.fetch_product_reviews(pid, max_pages=1)
-            all_reviews.extend(revs)
-            time.sleep(0.2)
+            # Fetch Reviews nếu có
+            if p.get("review_count", 0) > 0:
+                revs = ingestion.fetch_product_reviews(pid, max_pages=1)
+                all_reviews.extend(revs)
+            time.sleep(0.08)
             
     # Upload chi tiết sản phẩm và reviews vào Bronze
     if all_details:
@@ -181,7 +192,7 @@ def run_sample_ingestion():
     if all_reviews:
         upload_json_to_minio(all_reviews, f"bronze/reviews/crawl_date={ingestion.crawl_date}/reviews.json", ingestion.s3_client)
         
-    print("\n✅ Bronze Ingestion hoàn thành xuất sắc!")
+    print(f"\n✅ Bronze Ingestion hoàn thành: {len(sample_cats)} danh mục, {len(all_details)} sản phẩm, {len(all_reviews)} reviews!")
 
 if __name__ == "__main__":
     run_sample_ingestion()
