@@ -1,0 +1,27 @@
+# Environment & Secrets
+.env
+*.env
+*.pem
+*.key
+
+# Python & PySpark
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Volumes & Lakehouse Storage
+storage/
+minio_data/
+postgres_data/
+metabase_data/
+warehouse/
+spark-warehouse/
+derby.log
+metastore_db/
+
+# OS Specific
+.DS_Store
+Thumbs.db
