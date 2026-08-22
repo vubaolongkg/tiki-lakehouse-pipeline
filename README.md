@@ -1,157 +1,130 @@
-# 🛒 Tiki E-Commerce Modern Data Lakehouse Pipeline
+# Tiki E-Commerce Data Lakehouse Pipeline
 
-Pipeline Lakehouse end-to-end, tự động thu thập, chuẩn hóa và mô hình hóa dữ liệu thương mại điện tử từ API của Tiki.vn, theo **kiến trúc Medallion (Bronze → Silver → Gold)**, sử dụng **MinIO (S3)**, **PySpark**, **Delta Lake** và **PostgreSQL**.
+Pipeline thu thập, chuẩn hóa và mô hình hóa dữ liệu thương mại điện tử từ API của Tiki.vn, xây dựng theo kiến trúc Medallion (Bronze → Silver → Gold). Dữ liệu sau khi qua các lớp được nạp vào PostgreSQL và visualize bằng Metabase.
 
----
+Stack: MinIO, PySpark, Delta Lake, PostgreSQL, Airflow, Metabase — chạy hoàn toàn qua Docker Compose.
 
-## 📐 Tổng quan kiến trúc
+## Kiến trúc
 
-```text
-[ Tiki.vn REST APIs ]
-          │ (Requests / JSON Streaming)
-          ▼
-[ MinIO Object Storage (S3-compatible) ]
-   ├── Bronze Layer : Dữ liệu JSON thô, phân vùng theo ngày (`bronze/entity/crawl_date=YYYY-MM-DD/`)
-   │
-   │ (PySpark + Delta Lake: Schema Enforcement, Deduplication, MERGE INTO)
-   ▼
-   ├── Silver Layer : Bảng Delta đã làm sạch (`silver/categories`, `products`, `reviews`)
-   │
-   │ (PySpark ETL: Mô hình hóa chiều / Star Schema)
-   ▼
-[ PostgreSQL Serving Marts (Gold Layer) ]
-   ├── Bảng Dimension: `dim_products`, `dim_categories`
-   └── Bảng Fact     : `fact_daily_product_snapshot`, `fact_reviews`
+```
+Tiki.vn API
+    │  scrape JSON
+    ▼
+MinIO (Bronze) ── raw JSON, partition theo crawl_date
+    │  PySpark + Delta Lake: validate schema, dedup, MERGE INTO
+    ▼
+MinIO (Silver) ── Delta table đã clean (categories, products, reviews)
+    │  PySpark: build star schema
+    ▼
+PostgreSQL (Gold) ── dim/fact tables
+    │
+    ▼
+Metabase ── dashboard
 ```
 
----
+Toàn bộ 3 bước Bronze → Silver → Gold được Airflow điều phối chạy hằng ngày qua 1 DAG.
 
-## 🛠️ Công nghệ sử dụng & tính năng chính
+## Vì sao chọn stack này
 
-- **Lớp lưu trữ:** MinIO (Object Storage tương thích S3) — giải pháp nhẹ thay thế Hadoop HDFS.
-- **Định dạng bảng:** Delta Lake (giao dịch ACID, Time Travel, Upsert idempotent với `MERGE INTO`).
-- **Xử lý:** Apache Spark (PySpark 3.5) chạy trên Java 17 headless.
-- **Lớp phục vụ:** PostgreSQL (Data Warehouse / Marts theo mô hình Star Schema).
-- **Hạ tầng:** Docker & Docker Compose, triển khai đóng gói container, dễ tái lập.
+- **MinIO** thay vì HDFS vì setup local nhẹ hơn nhiều, vẫn tương thích S3 API nên code Spark không phải sửa gì khi đổi sang S3 thật sau này.
+- **Delta Lake** để có ACID transaction và `MERGE INTO`, tránh phải viết logic upsert thủ công mỗi lần crawl lại dữ liệu trùng.
+- **Airflow** để tự động hóa lịch chạy, retry khi fail, và dễ theo dõi log từng task thay vì chạy tay từng script.
+- **Metabase** vì nhẹ, setup nhanh, đủ dùng cho báo cáo nội bộ, không cần BI tool nặng như Superset hay Power BI.
 
----
+## Cấu trúc thư mục
 
-## 📁 Cấu trúc thư mục dự án
-
-```text
+```
 tiki-lakehouse-pipeline/
-├── dags/                        # Airflow DAGs (Điều phối luồng)
+├── dags/
+│   └── tiki_lakehouse_pipeline_dag.py   # DAG orchestrate Bronze -> Silver -> Gold
+├── dashboards/
+│   └── dashboard_overview.png            # ảnh chụp dashboard Metabase
 ├── src/
-│   ├── extract/                 # Script trích xuất dữ liệu & upload lên S3
-│   │   ├── minio_client.py      # Kết nối MinIO/S3 qua Boto3 & helper upload
-│   │   └── tiki_scraper.py      # Scraper API cho Categories, Listings, Details, Reviews
-│   └── transform/                # Job biến đổi dữ liệu với PySpark & Delta Lake
-│       ├── spark_session_helper.py # Cấu hình SparkSession với Delta & S3A jars
-│       ├── silver_transform.py  # Bronze → Silver Delta Tables
-│       ├── gold_transform.py    # Silver → Gold Star Schema (PostgreSQL)
-│       ├── peek_silver.py       # Tiện ích xem trước dữ liệu Silver Delta
-│       └── peek_gold.py         # Tiện ích xem trước dữ liệu Gold PostgreSQL
-├── Dockerfile                   # Airflow image tùy chỉnh với Java 17 & dependencies
-├── docker-compose.yml           # Thiết lập multi-container (MinIO, Postgres, Airflow, Metabase)
-├── requirements.txt             # Các thư viện Python cần thiết
+│   ├── extract/
+│   │   ├── minio_client.py               # helper connect MinIO/S3 qua boto3
+│   │   └── tiki_scraper.py               # scraper API Tiki (category, product, review)
+│   └── transform/
+│       ├── spark_session_helper.py       # config SparkSession + Delta & S3A jars
+│       ├── silver_transform.py           # Bronze -> Silver
+│       ├── gold_transform.py             # Silver -> Gold (star schema, ghi Postgres)
+│       ├── peek_silver.py                # xem nhanh data Silver
+│       └── peek_gold.py                  # xem nhanh data Gold
+├── Dockerfile                            # image Airflow custom, có Java 17 + PySpark
+├── docker-compose.yml
+├── requirements.txt
 └── README.md
 ```
 
----
+## Cài đặt
 
-## 🚀 Hướng dẫn bắt đầu nhanh
-
-### 1. Yêu cầu tiên quyết
-
-- Docker Desktop (chạy trên Linux, macOS, hoặc Windows qua WSL2).
-- Tối thiểu 4GB RAM cấp phát cho Docker.
-
-### 2. Build và khởi động hạ tầng
-
-Clone repository và khởi động toàn bộ các service:
+Yêu cầu: Docker Desktop, tối thiểu 4GB RAM cấp cho Docker.
 
 ```bash
-# 1. Clone repo
 git clone https://github.com/<your-username>/tiki-lakehouse-pipeline.git
 cd tiki-lakehouse-pipeline
 
-# 2. Build và khởi động containers
 docker compose build --no-cache
 docker compose up -d
 ```
 
-### 3. Địa chỉ truy cập các dịch vụ
+Các service sau khi lên:
 
-| Dịch vụ | Địa chỉ | Tài khoản |
+| Service | URL | Login |
 |---|---|---|
-| MinIO Storage Console | http://localhost:9001 | admin / password123 |
-| Airflow UI | http://localhost:8080 | admin / admin |
-| Metabase BI | http://localhost:3000 | — |
+| Airflow | http://localhost:8080 | admin / admin |
+| MinIO Console | http://localhost:9001 | admin / password123 |
+| Metabase | http://localhost:3000 | tự tạo account lần đầu |
+| PostgreSQL | localhost:5432 | airflow / airflow_password, db: airflow_db |
 
----
+## Chạy pipeline
 
-## 🔄 Các bước thực thi pipeline
+**Cách 1 — qua Airflow (khuyến nghị):**
 
-### Bước 1: Nạp dữ liệu thô vào lớp Bronze (MinIO)
+Vào Airflow UI, unpause DAG `tiki_lakehouse_daily_pipeline`, trigger chạy tay hoặc để tự chạy theo lịch hằng ngày. DAG gồm 3 task nối tiếp: `scrape_tiki_to_bronze` → `bronze_to_silver_delta` → `silver_to_gold_postgres`.
 
-Thu thập Categories, Product Listings, Product Details, và Reviews từ API Tiki, upload dữ liệu JSON thô đã phân vùng lên MinIO:
+**Cách 2 — chạy tay từng bước qua CLI:**
 
+Ingest vào Bronze:
 ```bash
 docker exec -it lakehouse_airflow python /opt/airflow/src/extract/tiki_scraper.py
 ```
+Ghi ra `s3://lakehouse/bronze/{entity}/crawl_date=YYYY-MM-DD/`
 
-Đường dẫn output: `s3://lakehouse/bronze/{entity}/crawl_date=YYYY-MM-DD/`
-
-### Bước 2: Biến đổi và làm sạch dữ liệu vào lớp Silver (Delta Lake)
-
-Đọc dữ liệu JSON từ Bronze, kiểm tra schema, loại bỏ trùng lặp theo khóa chính, và thực hiện `MERGE INTO` (Upsert) idempotent trên các bảng Delta Lake:
-
+Clean + merge vào Silver:
 ```bash
 docker exec -it lakehouse_airflow python /opt/airflow/src/transform/silver_transform.py
 ```
-
-Đường dẫn output: `s3://lakehouse/silver/{categories|products|reviews}/`
-
-Kiểm tra dữ liệu lớp Silver:
-
+Ghi ra `s3://lakehouse/silver/{categories|products|reviews}/`. Xem lại data:
 ```bash
 docker exec -it lakehouse_airflow python /opt/airflow/src/transform/peek_silver.py
 ```
 
-### Bước 3: Mô hình hóa và nạp dữ liệu vào lớp Gold (PostgreSQL)
-
-Biến đổi các bảng Delta của Silver thành Star Schema (Dimension & Fact) và ghi vào PostgreSQL để phục vụ phân tích với độ trễ thấp:
-
+Build star schema vào Gold:
 ```bash
 docker exec -it lakehouse_airflow python /opt/airflow/src/transform/gold_transform.py
 ```
-
-Kiểm tra các bảng lớp Gold trong PostgreSQL:
-
+Xem lại bảng trong Postgres:
 ```bash
 docker exec -it lakehouse_airflow python /opt/airflow/src/transform/peek_gold.py
 ```
 
-Hoặc truy vấn trực tiếp qua `psql`:
+## Schema lớp Gold
 
-```bash
-docker exec -it lakehouse_postgres psql -U airflow -d airflow_db -c "SELECT price_segment, COUNT(*) FROM fact_daily_product_snapshot GROUP BY price_segment;"
-```
+**Dimension**
+- `dim_categories`: category_id (PK), category_name, url
+- `dim_products`: product_id (PK), product_name, brand, short_description, image_url
 
----
+**Fact**
+- `fact_daily_product_snapshot`: snapshot_date, product_id (FK), price, original_price, discount, discount_rate, rating_average, review_count, inventory_status, price_segment
+- `fact_reviews`: review_id (PK), product_id (FK), rating, title, content, thank_count, comment_count, created_at
 
-## 📊 Tham chiếu Schema dữ liệu (Gold Marts)
+## Dashboard
 
-### Dimensions
+Metabase connect thẳng vào Postgres (lớp Gold), gồm:
 
-| Bảng | Các cột |
-|---|---|
-| `dim_categories` | `category_id` (PK), `category_name`, `url` |
-| `dim_products` | `product_id` (PK), `product_name`, `brand`, `short_description`, `image_url` |
+- Tổng quan số lượng sản phẩm, giá trung bình, mức giảm giá trung bình, rating trung bình.
+- Phân bố sản phẩm theo phân khúc giá (dưới 100K, 500K–1M, trên 5M...).
+- Top brand giảm giá sâu nhất.
+- Sản phẩm được review nhiều nhất / rating cao nhất.
 
-### Facts
-
-| Bảng | Các cột |
-|---|---|
-| `fact_daily_product_snapshot` | `snapshot_date`, `product_id` (FK), `price`, `original_price`, `discount`, `discount_rate`, `rating_average`, `review_count`, `inventory_status`, `price_segment` |
-| `fact_reviews` | `review_id` (PK), `product_id` (FK), `rating`, `title`, `content`, `thank_count`, `comment_count`, `created_at` |
+Ảnh chụp dashboard: `dashboards/dashboard_overview.png`
