@@ -127,4 +127,4 @@ Metabase connect thẳng vào Postgres (lớp Gold), gồm:
 - Top brand giảm giá sâu nhất.
 - Sản phẩm được review nhiều nhất / rating cao nhất.
 
-Ảnh chụp dashboard: `dashboards/dashboard_overview.png`
+Ảnh chụp dashboard: ![Tiki Executive Dashboard](dashboards/dashboard_overview.png)
