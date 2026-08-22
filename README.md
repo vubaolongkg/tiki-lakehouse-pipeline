@@ -74,7 +74,7 @@ Các service sau khi lên:
 | Airflow | http://localhost:8080 | admin / admin |
 | MinIO Console | http://localhost:9001 | admin / password123 |
 | Metabase | http://localhost:3000 | tự tạo account lần đầu |
-| PostgreSQL | localhost:5432 | airflow / airflow_password, db: airflow_db |
+| PostgreSQL | http://localhost:5432 | airflow / airflow_password, db: airflow_db |
 
 ## Chạy pipeline
 
