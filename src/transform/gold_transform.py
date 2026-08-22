@@ -5,9 +5,13 @@ from pyspark.sql import functions as F
 from spark_session_helper import get_spark_session
 
 def get_postgres_config():
-    db_user = os.getenv("POSTGRES_USER", "airflow")
-    db_password = os.getenv("POSTGRES_PASSWORD", "airflow_password")
-    db_url = "jdbc:postgresql://postgres:5432/airflow_db"
+    db_host = os.getenv("POSTGRES_HOST", "lakehouse_postgres")
+    db_port = os.getenv("POSTGRES_PORT", "5432")
+    db_name = os.getenv("POSTGRES_DB", "tiki_mart")
+    db_user = os.getenv("POSTGRES_USER", "postgres")
+    db_password = os.getenv("POSTGRES_PASSWORD", "password123")
+    
+    db_url = f"jdbc:postgresql://{db_host}:{db_port}/{db_name}"
     
     properties = {
         "user": db_user,
@@ -35,14 +39,18 @@ def build_gold_dimensions(spark, db_url, properties):
     )
     print("✅ Populated: dim_categories")
 
-    # 2. Dim Products
+    # 2. Dim Products with Audit Metadata (created_at, updated_at)
     df_prod = spark.read.format("delta").load("s3a://lakehouse/silver/products")
+    curr_ts = F.current_timestamp()
+    
     dim_products = df_prod.select(
         "product_id",
         F.col("name").alias("product_name"),
-        "brand",
+        F.coalesce(F.col("brand"), F.lit("Không có thương hiệu")).alias("brand"),
         "short_description",
-        F.col("thumbnail_url").alias("image_url")
+        F.col("thumbnail_url").alias("image_url"),
+        curr_ts.alias("created_at"),
+        curr_ts.alias("updated_at")
     ).dropDuplicates(["product_id"])
 
     dim_products.write.jdbc(
@@ -51,7 +59,7 @@ def build_gold_dimensions(spark, db_url, properties):
         mode="overwrite",
         properties=properties
     )
-    print("✅ Populated: dim_products")
+    print("✅ Populated: dim_products (with audit timestamps)")
 
 def build_gold_facts(spark, run_date, db_url, properties):
     print(f"\n--- [2/2] Building Gold Fact Tables for Date: {run_date} ---")
@@ -64,8 +72,9 @@ def build_gold_facts(spark, run_date, db_url, properties):
         .withColumn("snapshot_date", F.to_date(F.lit(run_date)))
         .withColumn(
             "discount_rate",
-            F.when(F.col("original_price") > 0, 
-                   F.round(F.col("discount") / F.col("original_price"), 4)
+            F.when(
+                (F.col("original_price") > 0) & (F.col("discount") > 0), 
+                F.round(F.col("discount") / F.col("original_price"), 4)
             ).otherwise(0.0)
         )
         .withColumn(
