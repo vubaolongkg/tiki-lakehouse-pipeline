@@ -1,130 +1,146 @@
-# Tiki E-Commerce Data Lakehouse Pipeline
+# Tiki E-Commerce Data Lakehouse
 
-Pipeline thu thập, chuẩn hóa và mô hình hóa dữ liệu thương mại điện tử từ API của Tiki.vn, xây dựng theo kiến trúc Medallion (Bronze → Silver → Gold). Dữ liệu sau khi qua các lớp được nạp vào PostgreSQL và visualize bằng Metabase.
+A data lakehouse pipeline that ingests, cleans, and serves e-commerce data from Tiki.vn. Built on the Medallion architecture (Bronze -> Silver -> Gold), using Delta Lake for ACID transactions and Airflow for orchestration.
 
-Stack: MinIO, PySpark, Delta Lake, PostgreSQL, Airflow, Metabase — chạy hoàn toàn qua Docker Compose.
-
-## Kiến trúc
+## Architecture
 
 ```
-Tiki.vn API
-    │  scrape JSON
-    ▼
-MinIO (Bronze) ── raw JSON, partition theo crawl_date
-    │  PySpark + Delta Lake: validate schema, dedup, MERGE INTO
-    ▼
-MinIO (Silver) ── Delta table đã clean (categories, products, reviews)
-    │  PySpark: build star schema
-    ▼
-PostgreSQL (Gold) ── dim/fact tables
-    │
-    ▼
-Metabase ── dashboard
+Tiki.vn API/HTML
+      |
+      v  multi-threaded scraper, retry with backoff
+Bronze (MinIO/S3, raw JSON)
+  |-- categories
+  |-- products
+  `-- reviews
+      |
+      v  PySpark + Delta, data quality checks
+Silver (Delta Lake)
+  |-- categories  - SCD Type 1 merge
+  |-- products    - sanitization + range checks
+  `-- reviews     - dedup, timezone normalized to Asia/Ho_Chi_Minh
+      |
+      v  dimensional modeling, staging + upsert
+Gold (PostgreSQL)
+  |-- dim_categories, dim_products
+  |-- fact_reviews
+  `-- fact_daily_product_snapshot
+      |
+      v
+Metabase
 ```
 
-Toàn bộ 3 bước Bronze → Silver → Gold được Airflow điều phối chạy hằng ngày qua 1 DAG.
+## Key technical points
 
-## Vì sao chọn stack này
+- **Ingestion**: multi-threaded crawler (`ThreadPoolExecutor`), connection pooling via `requests.Session`, exponential backoff to handle WAF/rate-limit blocks.
+- **Data quality**: primary key uniqueness checks, non-null constraints, numeric range checks, timezone normalization.
+- **Delta Lake**: uses `DeltaTable.merge()` for upserts (SCD Type 1), with time travel support.
+- **Loading into Postgres**: staging table + `ON CONFLICT DO UPDATE`, so the pipeline can be rerun without creating duplicates or lock contention.
 
-- **MinIO** thay vì HDFS vì setup local nhẹ hơn nhiều, vẫn tương thích S3 API nên code Spark không phải sửa gì khi đổi sang S3 thật sau này.
-- **Delta Lake** để có ACID transaction và `MERGE INTO`, tránh phải viết logic upsert thủ công mỗi lần crawl lại dữ liệu trùng.
-- **Airflow** để tự động hóa lịch chạy, retry khi fail, và dễ theo dõi log từng task thay vì chạy tay từng script.
-- **Metabase** vì nhẹ, setup nhanh, đủ dùng cho báo cáo nội bộ, không cần BI tool nặng như Superset hay Power BI.
+## Benchmark results (single real run)
 
-## Cấu trúc thư mục
+| Metric | Value |
+|---|---|
+| Total wall time | 2,230.22 s (~37 min) |
+| HTTP requests | 23,370 (zero failures) |
+| Data downloaded | 440.95 MB |
+| Avg request latency | 680.18 ms |
+| Throughput | 4.68 SKU/s, 47.83 records/s |
+| Bronze categories | 238 |
+| Bronze products | 10,434 |
+| Bronze reviews | 97,633 |
+
+## Stack
+
+- Airflow 2.8.1 (LocalExecutor)
+- Spark 3.4.x / PySpark
+- MinIO (S3-compatible), Delta Lake 3.1.0
+- PostgreSQL 15 (Alpine)
+- Pytest for testing
+- Docker Compose
+
+## Repository structure
 
 ```
 tiki-lakehouse-pipeline/
 ├── dags/
-│   └── tiki_lakehouse_pipeline_dag.py   # DAG orchestrate Bronze -> Silver -> Gold
-├── dashboards/
-│   └── dashboard_overview.png            # ảnh chụp dashboard Metabase
+│   └── tiki_lakehouse_dag.py       # daily pipeline DAG
 ├── src/
 │   ├── extract/
-│   │   ├── minio_client.py               # helper connect MinIO/S3 qua boto3
-│   │   └── tiki_scraper.py               # scraper API Tiki (category, product, review)
-│   └── transform/
-│       ├── spark_session_helper.py       # config SparkSession + Delta & S3A jars
-│       ├── silver_transform.py           # Bronze -> Silver
-│       ├── gold_transform.py             # Silver -> Gold (star schema, ghi Postgres)
-│       ├── peek_silver.py                # xem nhanh data Silver
-│       └── peek_gold.py                  # xem nhanh data Gold
-├── Dockerfile                            # image Airflow custom, có Java 17 + PySpark
-├── docker-compose.yml
+│   │   ├── minio_client.py         # MinIO wrapper
+│   │   └── tiki_scraper.py         # multi-threaded crawler
+│   ├── transform/
+│   │   ├── spark_session_helper.py # SparkSession config (Delta, S3A, JDBC)
+│   │   ├── data_quality.py         # data quality rules
+│   │   ├── silver_transform.py     # Bronze -> Silver
+│   │   └── gold_transform.py       # Silver -> Gold
+├── tests/
+├── docker-compose.yaml
+├── Dockerfile
 ├── requirements.txt
 └── README.md
 ```
 
-## Cài đặt
+## Running it
 
-Yêu cầu: Docker Desktop, tối thiểu 4GB RAM cấp cho Docker.
+### 1. Start infrastructure
 
 ```bash
-git clone https://github.com/<your-username>/tiki-lakehouse-pipeline.git
-cd tiki-lakehouse-pipeline
-
-docker compose build --no-cache
 docker compose up -d
 ```
 
-Các service sau khi lên:
+### 2. Services
 
-| Service | URL | Login |
-|---|---|---|
-| Airflow | http://localhost:8080 | admin / admin |
-| MinIO Console | http://localhost:9001 | admin / password123 |
-| Metabase | http://localhost:3000 | tự tạo account lần đầu |
-| PostgreSQL | http://localhost:5432 | airflow / airflow_password, db: airflow_db |
+- Airflow: http://localhost:8080 (admin / admin)
+- MinIO Console: http://localhost:9001 (admin / password123)
+- Metabase: http://localhost:3000
 
-## Chạy pipeline
+### 3. Run the pipeline manually
 
-**Cách 1 — qua Airflow (khuyến nghị):**
-
-Vào Airflow UI, unpause DAG `tiki_lakehouse_daily_pipeline`, trigger chạy tay hoặc để tự chạy theo lịch hằng ngày. DAG gồm 3 task nối tiếp: `scrape_tiki_to_bronze` → `bronze_to_silver_delta` → `silver_to_gold_postgres`.
-
-**Cách 2 — chạy tay từng bước qua CLI:**
-
-Ingest vào Bronze:
 ```bash
+# Bronze
 docker exec -it lakehouse_airflow python /opt/airflow/src/extract/tiki_scraper.py
-```
-Ghi ra `s3://lakehouse/bronze/{entity}/crawl_date=YYYY-MM-DD/`
 
-Clean + merge vào Silver:
-```bash
+# Silver
 docker exec -it lakehouse_airflow python /opt/airflow/src/transform/silver_transform.py
-```
-Ghi ra `s3://lakehouse/silver/{categories|products|reviews}/`. Xem lại data:
-```bash
-docker exec -it lakehouse_airflow python /opt/airflow/src/transform/peek_silver.py
-```
 
-Build star schema vào Gold:
-```bash
+# Gold
 docker exec -it lakehouse_airflow python /opt/airflow/src/transform/gold_transform.py
 ```
-Xem lại bảng trong Postgres:
+
+### 4. Tests
+
 ```bash
-docker exec -it lakehouse_airflow python /opt/airflow/src/transform/peek_gold.py
+docker exec -it lakehouse_airflow pytest /opt/airflow/tests/ -v
 ```
 
-## Schema lớp Gold
+## Sample queries (Gold layer)
 
-**Dimension**
-- `dim_categories`: category_id (PK), category_name, url
-- `dim_products`: product_id (PK), product_name, brand, short_description, image_url
+Rating distribution across all reviews:
 
-**Fact**
-- `fact_daily_product_snapshot`: snapshot_date, product_id (FK), price, original_price, discount, discount_rate, rating_average, review_count, inventory_status, price_segment
-- `fact_reviews`: review_id (PK), product_id (FK), rating, title, content, thank_count, comment_count, created_at
+```sql
+SELECT 
+    rating,
+    COUNT(*) AS total_reviews,
+    ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) AS percentage,
+    SUM(thank_count) AS total_helpful_votes
+FROM fact_reviews
+GROUP BY rating
+ORDER BY rating DESC;
+```
 
-## Dashboard
+Top 5 highest-rated brands (min. 100 reviews):
 
-Metabase connect thẳng vào Postgres (lớp Gold), gồm:
-
-- Tổng quan số lượng sản phẩm, giá trung bình, mức giảm giá trung bình, rating trung bình.
-- Phân bố sản phẩm theo phân khúc giá (dưới 100K, 500K–1M, trên 5M...).
-- Top brand giảm giá sâu nhất.
-- Sản phẩm được review nhiều nhất / rating cao nhất.
-
-Ảnh chụp dashboard: ![Tiki Executive Dashboard](dashboards/dashboard_overview.png)
+```sql
+SELECT 
+    p.brand,
+    COUNT(r.review_id) AS total_reviews,
+    ROUND(AVG(r.rating)::numeric, 2) AS avg_rating,
+    SUM(CASE WHEN r.rating >= 4 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS positive_rate_pct
+FROM dim_products p
+JOIN fact_reviews r ON p.product_id = r.product_id
+WHERE p.brand IS NOT NULL AND p.brand <> 'No brand'
+GROUP BY p.brand
+HAVING COUNT(r.review_id) >= 100
+ORDER BY avg_rating DESC, total_reviews DESC
+LIMIT 5;
+```
