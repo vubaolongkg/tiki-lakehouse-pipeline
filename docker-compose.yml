@@ -3,7 +3,7 @@ version: '3.8'
 services:
   minio:
     image: minio/minio:latest
-    container_name: lakehouse_minio
+    container_name: lakehouse-minio
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -48,9 +48,20 @@ services:
       - _AIRFLOW_WWW_USER_CREATE=true
       - _AIRFLOW_WWW_USER_USERNAME=admin
       - _AIRFLOW_WWW_USER_PASSWORD=admin
+      # --- Cấu hình kết nối PostgreSQL cho tầng Gold ---
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=airflow_db
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow_password
+      # --- Cấu hình MinIO ---
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=admin
+      - MINIO_SECRET_KEY=password123
     volumes:
       - ./dags:/opt/airflow/dags
       - ./src:/opt/airflow/src
+      - ./tests:/opt/airflow/tests
     ports:
       - "8080:8080"
     command: bash -c "airflow webserver & airflow scheduler"
